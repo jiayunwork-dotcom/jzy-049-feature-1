@@ -17,6 +17,7 @@ import (
 
 	"gaussian-plume/internal/job"
 	"gaussian-plume/internal/model"
+	"gaussian-plume/internal/multisource"
 )
 
 //go:embed migrations_schema.sql
@@ -112,6 +113,64 @@ func (p *Postgres) Get(ctx context.Context, id string) (model.JobRecord, error) 
 	}
 	if err := json.Unmarshal([]byte(resJSON), &rec.Result); err != nil {
 		return model.JobRecord{}, fmt.Errorf("反序列化 result 失败: %w", err)
+	}
+	return rec, nil
+}
+
+// SaveMulti 插入一条多源合成作业行（multisource.Store 实现）。
+// 完整输入（每个源的坐标/排放条件）与逐受体、逐源拆解结果整体存 JSONB，
+// 回查时可全部还原，不只是一个总浓度数字。
+func (p *Postgres) SaveMulti(ctx context.Context, rec model.MultiSourceJobRecord) error {
+	reqJSON, err := json.Marshal(rec.Request)
+	if err != nil {
+		return fmt.Errorf("序列化 request 失败: %w", err)
+	}
+	resJSON, err := json.Marshal(rec.Result)
+	if err != nil {
+		return fmt.Errorf("序列化 result 失败: %w", err)
+	}
+	_, err = p.pool.Exec(ctx, `
+		INSERT INTO multisource_jobs (id, wind_angle_deg, u, stability, status, request, result, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (id) DO NOTHING`,
+		rec.ID,
+		rec.Request.WindAngleDeg,
+		rec.Request.U,
+		string(rec.Request.Stability),
+		rec.Result.Status,
+		string(reqJSON),
+		string(resJSON),
+		rec.CreatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("写入多源合成作业失败: %w", err)
+	}
+	return nil
+}
+
+// GetMulti 按标识回查多源合成作业；不存在返回 multisource.ErrNotFound。
+func (p *Postgres) GetMulti(ctx context.Context, id string) (model.MultiSourceJobRecord, error) {
+	var (
+		rec     model.MultiSourceJobRecord
+		reqJSON string
+		resJSON string
+		stab    string
+	)
+	err := p.pool.QueryRow(ctx, `
+		SELECT id, request, result, stability, to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+		FROM multisource_jobs WHERE id = $1`, id).
+		Scan(&rec.ID, &reqJSON, &resJSON, &stab, &rec.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.MultiSourceJobRecord{}, multisource.ErrNotFound{ID: id}
+	}
+	if err != nil {
+		return model.MultiSourceJobRecord{}, fmt.Errorf("读取多源合成作业失败: %w", err)
+	}
+	if err := json.Unmarshal([]byte(reqJSON), &rec.Request); err != nil {
+		return model.MultiSourceJobRecord{}, fmt.Errorf("反序列化 request 失败: %w", err)
+	}
+	if err := json.Unmarshal([]byte(resJSON), &rec.Result); err != nil {
+		return model.MultiSourceJobRecord{}, fmt.Errorf("反序列化 result 失败: %w", err)
 	}
 	return rec, nil
 }

@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -9,6 +10,7 @@ import (
 
 	"gaussian-plume/internal/job"
 	"gaussian-plume/internal/model"
+	"gaussian-plume/internal/multisource"
 	"gaussian-plume/internal/store"
 )
 
@@ -123,5 +125,82 @@ func TestPostgresSeedDemo(t *testing.T) {
 	}
 	if rec.Result.Status != "ok" {
 		t.Errorf("示范作业状态=%s，期望 ok", rec.Result.Status)
+	}
+}
+
+func multiReq(q float64) model.MultiSourceRequest {
+	return model.MultiSourceRequest{
+		WindAngleDeg: 30, U: 5, Stability: model.StabilityD,
+		Sources: []model.PointSource{
+			{Name: "S1", X: 0, Y: 0, Q: q, PhysicalH: 60},
+			{Name: "S2", X: 200, Y: 100, Q: 0.02, PhysicalH: 30},
+		},
+		Receptors: []model.ReceptorInput{{Name: "厂界", X: 1000, Y: 0}},
+	}
+}
+
+// 多源作业在真实 PostgreSQL 上：提交后回查，每个源的输入与逐源拆解完整还原。
+func TestPostgresMultiSourceSaveAndGet(t *testing.T) {
+	pg := newStore(t)
+	svc := multisource.NewService(pg)
+	ctx := context.Background()
+
+	rec, err := svc.Submit(ctx, multiReq(0.07), "it-ms-save-get")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.Get(ctx, rec.ID)
+	if err != nil {
+		t.Fatalf("回查失败: %v", err)
+	}
+	if len(got.Request.Sources) != 2 || got.Request.Sources[0].Q != 0.07 ||
+		got.Request.Sources[1].X != 200 || got.Request.WindAngleDeg != 30 {
+		t.Errorf("回查源输入不完整: %+v", got.Request.Sources)
+	}
+	if len(got.Result.Receptors) != 1 ||
+		len(got.Result.Receptors[0].Contributions) != 2 ||
+		got.Result.Receptors[0].TotalC != rec.Result.Receptors[0].TotalC {
+		t.Errorf("回查结果不完整: %+v", got.Result.Receptors)
+	}
+	var nf multisource.ErrNotFound
+	if _, err := svc.Get(ctx, "missing-ms"); !errors.As(err, &nf) {
+		t.Errorf("不存在的多源作业应返回 ErrNotFound, got %v", err)
+	}
+}
+
+// 并发提交多条多源作业：各行不串、不互相覆盖，且都能各自回查。
+func TestPostgresMultiSourceConcurrent(t *testing.T) {
+	pg := newStore(t)
+	svc := multisource.NewService(pg)
+	ctx := context.Background()
+	const n = 30
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			id := fmt.Sprintf("it-ms-concurrent-%d", i)
+			if _, err := svc.Submit(ctx, multiReq(0.001*float64(i+1)), id); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("并发提交出错: %v", err)
+		}
+	}
+	for i := 0; i < n; i++ {
+		rec, err := svc.Get(ctx, fmt.Sprintf("it-ms-concurrent-%d", i))
+		if err != nil {
+			t.Fatalf("回查 %d: %v", i, err)
+		}
+		if want := 0.001 * float64(i+1); rec.Request.Sources[0].Q != want {
+			t.Errorf("作业 %d 源强被串写: got %v want %v", i, rec.Request.Sources[0].Q, want)
+		}
 	}
 }

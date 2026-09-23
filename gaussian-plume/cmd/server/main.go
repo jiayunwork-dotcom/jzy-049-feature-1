@@ -12,6 +12,7 @@ import (
 	"gaussian-plume/internal/api"
 	"gaussian-plume/internal/config"
 	"gaussian-plume/internal/job"
+	"gaussian-plume/internal/multisource"
 	"gaussian-plume/internal/store"
 )
 
@@ -26,6 +27,7 @@ func main() {
 	defer pg.Close()
 
 	jobs := job.NewService(pg)
+	multi := multisource.NewService(pg)
 
 	if cfg.SeedDemoOnBoot {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -41,7 +43,7 @@ func main() {
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
 
-	srv := api.NewServer(jobs)
+	srv := api.NewServer(jobs, multi)
 	srv.Register(r)
 
 	log.Printf("高斯烟羽扩散服务监听 %s", cfg.HTTPAddr)

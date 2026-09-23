@@ -10,13 +10,15 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"gaussian-plume/internal/job"
+	"gaussian-plume/internal/multisource"
 )
 
 func newTestRouter() (*gin.Engine, *job.MemoryStore) {
 	gin.SetMode(gin.TestMode)
 	store := job.NewMemoryStore()
 	svc := job.NewService(store)
-	srv := NewServer(svc)
+	multi := multisource.NewService(multisource.NewMemoryStore())
+	srv := NewServer(svc, multi)
 	r := gin.New()
 	srv.Register(r)
 	return r, store
