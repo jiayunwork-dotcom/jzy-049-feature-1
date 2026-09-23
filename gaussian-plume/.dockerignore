@@ -1,0 +1,7 @@
+*.out
+*.test
+bin/
+.idea/
+.vscode/
+.git/
+README.md
