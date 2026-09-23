@@ -115,3 +115,83 @@ type JobRecord struct {
 	Result    ScanResult  `json:"result"`
 	CreatedAt string      `json:"created_at"`
 }
+
+// XY 是共享平面坐标系中的水平位置（m）。所有点源与受体点都先摆进同一个
+// 平面直角坐标系，再按统一风向角投影出沿风/侧风分量。
+type XY struct {
+	X float64 `json:"x"` // 东向坐标 m
+	Y float64 `json:"y"` // 北向坐标 m
+}
+
+// ReceptorInput 是多源叠加作业中的一个受体点（地面，z=0）。
+type ReceptorInput struct {
+	ID string `json:"id,omitempty"` // 可选调用方标识；缺省用提交序号
+	XY
+}
+
+// PointSourceInput 是多源叠加作业中的一个连续点源。
+// 每个源带自己的水平位置、源强、物理烟囱高度，热抬升参数可选。
+type PointSourceInput struct {
+	ID           string     `json:"id,omitempty"` // 可选调用方标识；缺省用提交序号
+	XY                      // 源的水平位置 m（共享平面坐标系）
+	Q            float64    `json:"q"`                       // 源强 kg/s
+	PhysicalH    float64    `json:"physical_h"`              // 物理烟囱高度 hs m
+	BuoyancyRise *RiseInput `json:"buoyancy_rise,omitempty"` // 可选：Briggs 热抬升
+	EffectiveH   float64    `json:"effective_h,omitempty"`   // 可直接给定有效源高 m
+	UseGivenH    bool       `json:"use_given_h,omitempty"`   // 与 buoyancy_rise 互斥
+}
+
+// MultiSourceRequest 是一次多点源叠加稳态计算的全部输入。
+// 风向角、风速、稳定度整批统一，源与受体共享一个平面坐标系。
+type MultiSourceRequest struct {
+	WindDir   float64            `json:"wind_dir"` // 风向角（气象罗盘约定，度，见 projection 包）
+	U         float64            `json:"u"`        // 统一风速 m/s
+	Stability Stability          `json:"stability"`
+	Receptors []ReceptorInput    `json:"receptors"`
+	Sources   []PointSourceInput `json:"sources"`
+}
+
+// SourceContribution 是单个点源在单个受体点上的贡献明细。
+// 非法源按零贡献处理并用 Error 说明原因；上风/侧风自然趋零不用 Error。
+type SourceContribution struct {
+	SourceID   string   `json:"source_id"`
+	Index      int      `json:"index"`
+	C          float64  `json:"c"`                     // 该源对该受体的贡献浓度 kg/m^3
+	Share      float64  `json:"share"`                 // 占该受体合成浓度的份额（0–1）；合成浓度为 0 时取 0
+	DownwindX  float64  `json:"downwind_x"`            // 投影后的沿风下风分量 m（可为负：受体在源上风）
+	CrosswindY float64  `json:"crosswind_y"`           // 投影后的垂直风向侧风分量 m
+	SigmaY     *float64 `json:"sigma_y,omitempty"`     // 实际使用的横向扩散参数 m
+	SigmaZ     *float64 `json:"sigma_z,omitempty"`     // 实际使用的垂向扩散参数 m
+	EffectiveH *float64 `json:"effective_h,omitempty"` // 实际使用的有效源高 m
+	DeltaH     *float64 `json:"delta_h,omitempty"`     // 热抬升量 m（仅叠抬升时）
+	RiseRegime string   `json:"rise_regime,omitempty"`
+	Error      string   `json:"error,omitempty"` // 该源非法时的零贡献原因
+}
+
+// ReceptorResult 是一个受体点上所有点源的叠加结果与逐项贡献。
+type ReceptorResult struct {
+	ReceptorID    string               `json:"receptor_id"`
+	Index         int                  `json:"index"`
+	X             float64              `json:"x"` // 受体东向坐标 m
+	Y             float64              `json:"y"` // 受体北向坐标 m
+	C             float64              `json:"c"` // 合成地面浓度 kg/m^3
+	Contributions []SourceContribution `json:"contributions"`
+}
+
+// MultiSourceResult 是一次多点源叠加作业的整体结果。
+type MultiSourceResult struct {
+	Status    string           `json:"status"` // "ok" 全部源合法；"partial" 存在被按零贡献处理的问题源
+	WindDir   float64          `json:"wind_dir"`
+	U         float64          `json:"u"`
+	Stability Stability        `json:"stability"`
+	Receptors []ReceptorResult `json:"receptors"`
+}
+
+// MultiSourceJobRecord 是落库、可回查的多点源叠加作业；
+// 每个源的原始输入同时逐行落 multi_source_job_sources 表，回查时完整还原。
+type MultiSourceJobRecord struct {
+	ID        string             `json:"id"`
+	Request   MultiSourceRequest `json:"request"`
+	Result    MultiSourceResult  `json:"result"`
+	CreatedAt string             `json:"created_at"`
+}

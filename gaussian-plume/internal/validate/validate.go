@@ -178,3 +178,63 @@ func Scan(req *model.ScanRequest) error {
 	}
 	return nil
 }
+
+// MultiSource 校验多点源叠加作业的【作业级公共条件】：风向角、风速、稳定度、
+// 源列表与受体列表非空，以及受体坐标有限。
+//
+// 注意：个别源自身的排放条件非法（源强为负、物理源高为负、抬升参数非法等）
+// 属于【源级】问题，不在此整单拒绝——它们在计算编排里被隔离成零贡献并说明
+// 原因（见 multisource.ValidateSource），作业照算、照落库（status=partial）。
+//
+// 会把稳定度归一化、风向角归一化到 [0,360) 后回写，保证落库与回查口径唯一。
+func MultiSource(req *model.MultiSourceRequest) error {
+	var errs Errors
+	if nonFinite(req.WindDir) {
+		errs = append(errs, FieldError{"wind_dir", "风向角必须为有限数值（气象罗盘度，正北起算顺时针）"})
+	}
+	if nonFinite(req.U) {
+		errs = append(errs, FieldError{"u", "风速必须为有限数值"})
+	} else if req.U <= 0 {
+		errs = append(errs, FieldError{"u", fmt.Sprintf("风速 u=%g 必须为正", req.U)})
+	}
+	st := req.Stability.Normalize()
+	if !st.Valid() {
+		errs = append(errs, FieldError{"stability", fmt.Sprintf("稳定度类别 %q 不在 A–F 之间", req.Stability)})
+	} else {
+		req.Stability = st
+	}
+	if len(req.Sources) == 0 {
+		errs = append(errs, FieldError{"sources", "点源列表不能为空，至少提交一个点源"})
+	}
+	if len(req.Receptors) == 0 {
+		errs = append(errs, FieldError{"receptors", "受体点列表不能为空，至少给一个受体点"})
+	}
+	for i, rc := range req.Receptors {
+		f := fmt.Sprintf("receptors[%d]", i)
+		if nonFinite(rc.X) || nonFinite(rc.Y) {
+			errs = append(errs, FieldError{f, "受体点水平坐标必须为有限数值"})
+		}
+	}
+	if len(errs) > 0 {
+		return errs
+	}
+	// 风向角归一化放到错误判断之后（NaN 取模无意义）。
+	req.WindDir = NormalizeWindDirPublic(req.WindDir)
+	// 给每个源的抬升输入回填作业级风速/稳定度（与扫描作业同一约定）。
+	for i := range req.Sources {
+		if r := req.Sources[i].BuoyancyRise; r != nil && r.U == 0 {
+			r.U = req.U
+			r.Stability = req.Stability
+		}
+	}
+	return nil
+}
+
+// NormalizeWindDirPublic 把风向角归一化到 [0,360)；入参已保证有限。
+func NormalizeWindDirPublic(deg float64) float64 {
+	d := math.Mod(deg, 360)
+	if d < 0 {
+		d += 360
+	}
+	return d
+}
